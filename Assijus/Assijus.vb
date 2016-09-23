@@ -10,6 +10,7 @@ Module Assijus
     Dim subject As String = "ICP-Brasil"
     Dim token As String
     Dim authkey As String
+    Dim cpf As String
 
     Sub cert()
         Dim subjectRegEx As String = "ICP-Brasil"
@@ -118,7 +119,7 @@ Module Assijus
             Dim jsonOperationGetResponse As String = reader.ReadToEnd()
             obj = jsonSerializer.Deserialize(Of T)(jsonOperationGetResponse)
         Catch exep As Exception
-            Throw New RestException(context, ex)
+            Throw New RestException(context, exep)
         End Try
 
         If Not IsNothing(ex) OrElse (Not IsNothing(obj) AndAlso Not IsNothing(obj.errormsg)) Then
@@ -171,6 +172,7 @@ Module Assijus
 
         Dim authresponse As AuthResponse = http(Of AuthResponse)("autenticar", "/auth", authrequest)
         authkey = authresponse.authkey
+        cpf = authresponse.cpf
     End Sub
 
     Function getAuthKey() As String
@@ -178,6 +180,13 @@ Module Assijus
             produceAuthKey()
         End If
         Return authkey
+    End Function
+
+    Function getCPF() As String
+        If cpf Is Nothing Then
+            produceAuthKey()
+        End If
+        Return cpf
     End Function
 
     Function getList() As Doc()
@@ -318,6 +327,7 @@ Module Assijus
         Inherits RestResponse
 
         Public authkey As String
+        Public cpf As String
     End Class
 
 

@@ -13,21 +13,26 @@ Imports System.Web.Script.Serialization
 Imports System.IO
 Imports System.Deployment.Application
 Imports WebSocket4Net
+Imports uPLibrary.Networking.M2Mqtt.Messages
+Imports uPLibrary.Networking.M2Mqtt
 
 Public Class AppContext
     Inherits ApplicationContext
 
 #Region " Storage "
+    Shared currentAppContext As AppContext
 
     Private WithEvents Tray As NotifyIcon
     Private WithEvents MainMenu As ContextMenuStrip
     Private WithEvents mnuDisplayForm As ToolStripMenuItem
     Private WithEvents mnuSep1 As ToolStripSeparator
     Private WithEvents mnuConnect As ToolStripMenuItem
+    Private WithEvents mnuMQTT As ToolStripMenuItem
     Private WithEvents mnuSep2 As ToolStripSeparator
     Private WithEvents mnuExit As ToolStripMenuItem
     Private WithEvents mnuShowSite As ToolStripMenuItem
     Private WithEvents mnuShowForm As ToolStripMenuItem
+    Private mqttClient As MqttClient
 
     Private httpListener As HttpListener
     Private tcpListener As TcpListener
@@ -44,7 +49,10 @@ Public Class AppContext
 
 #Region " Constructor "
 
+
     Public Sub New()
+        currentAppContext = Me
+
         Dim arguments As String() = Environment.GetCommandLineArgs()
 
         If arguments.Length >= 2 Then
@@ -57,11 +65,13 @@ Public Class AppContext
         mnuShowForm = New ToolStripMenuItem("Abrir Assijus Windows")
         mnuSep1 = New ToolStripSeparator()
         mnuConnect = New ToolStripMenuItem("WebSocket")
+        mnuMQTT = New ToolStripMenuItem("MQTT")
+
         ' mnuConnect.CheckOnClick = True
         mnuSep2 = New ToolStripSeparator()
         mnuExit = New ToolStripMenuItem("Sair")
         MainMenu = New ContextMenuStrip
-        MainMenu.Items.AddRange(New ToolStripItem() {mnuShowSite, mnuShowForm, mnuSep1, mnuConnect, mnuSep2, mnuExit})
+        MainMenu.Items.AddRange(New ToolStripItem() {mnuShowSite, mnuShowForm, mnuSep1, mnuConnect, mnuMQTT, mnuSep2, mnuExit})
 
         'Initialize the tray
         Tray = New NotifyIcon
@@ -85,6 +95,7 @@ Public Class AppContext
         'HttpServer()
         launchAssijusWebSite()
 
+        ' Start websocket
         Try
             websocket = New WebSocket4Net.WebSocket("ws://localhost:8080/assijus/websocket/server")
             AddHandler websocket.Opened, Sub(s, e) socketOpened(s, e)
@@ -96,7 +107,38 @@ Public Class AppContext
         Catch ex As Exception
             showMsg("Erro abrindo socket: " & ex.Message)
         End Try
+
+        ' Start mqtt
+        Try
+            Dim clientId As String = Guid.NewGuid().ToString()
+            mqttClient = New MqttClient("m12.cloudmqtt.com", 15388, False, Nothing, Nothing, MqttSslProtocols.None)
+            mqttClient.Connect(clientId, "etggebbm", "gBK3s8AdE0t5")
+
+            'Dim mqttClient As MqttClient = New MqttClient("f250", 1883, False, Nothing, Nothing, MqttSslProtocols.None)
+            'mqttClient.Connect(clientId)
+
+            Dim ls As String()
+            ReDim ls(0)
+            ls(0) = "/" & Assijus.getCPF() & "/browser"
+            Dim ll As Byte()
+            ReDim ll(0)
+            ll(0) = MqttMsgBase.QOS_LEVEL_EXACTLY_ONCE
+
+            mqttClient.Subscribe(ls, ll)
+            AddHandler mqttClient.MqttMsgPublishReceived, AddressOf mqttClient_MqttMsgPublishReceived
+            AddHandler mqttClient.ConnectionClosed, AddressOf mqttClient_ConnectionClosed
+
+            wsSend("{""kind"":""HELLO"",""certificate"":""" & Assijus.currentcert() & """,""app"":""signer""}")
+            SetMQTTChecked(True)
+
+            'mqttClient.Disconnect()
+        Catch ex As Exception
+            showMsg("Erro conectando MQTT: " & ex.Message)
+        End Try
     End Sub
+
+
+
 
     Sub socketOpened(s As WebSocket, e As EventArgs)
         s.Send("{""kind"":""HELLO"",""certificate"":""" & Assijus.currentcert() & """,""app"":""signer""}")
@@ -130,6 +172,39 @@ Public Class AppContext
 
     End Sub
 
+
+    Shared Sub mqttClient_MqttMsgPublishReceived(sender As Object, e As MqttMsgPublishEventArgs)
+        Dim encoder As New UTF8Encoding()
+        Dim msg As String = encoder.GetString(e.Message)
+        Console.Write("mqtt received: " & msg)
+        If msg.Contains("""kind"":""START""") OrElse msg.Contains("""kind"": ""START""") Then
+            currentAppContext.batchsign(msg)
+        ElseIf msg.Contains("""kind"":""PING""") OrElse msg.Contains("""kind"": ""PING""") Then
+            currentAppContext.wsSend("{""kind"":""PONG""}")
+        End If
+    End Sub
+
+    Shared Sub mqttClient_MqttMsgPublished(sender As Object, e As MqttMsgPublishedEventArgs)
+
+    End Sub
+
+    Shared Sub mqttClient_ConnectionClosed(sender As Object, e As EventArgs)
+        If currentAppContext.mnuMQTT.Checked Then
+            currentAppContext.showMsg("MQTT desconectado!")
+            currentAppContext.SetMQTTChecked(False)
+        End If
+    End Sub
+
+    Shared Sub mqttClient_MqttMsgSubscribed(sender As Object, e As MqttMsgSubscribedEventArgs)
+
+    End Sub
+
+    Shared Sub mqttClient_MqttMsgUnsubscribed(sender As Object, e As MqttMsgUnsubscribedEventArgs)
+
+    End Sub
+
+
+
     Public Sub showMsg(msg As String)
 
         Tray.BalloonTipTitle = "Assijus"
@@ -144,7 +219,14 @@ Public Class AppContext
                 websocket.Send(json)
             End If
         Catch ex As Exception
-            Console.WriteLine(json)
+            Console.WriteLine("exception during send ws: " + json)
+        End Try
+        Try
+            If Not IsNothing(mqttClient) Then
+                mqttClient.Publish("/" & Assijus.getCPF() & "/signer", Encoding.UTF8.GetBytes(json), MqttMsgBase.QOS_LEVEL_EXACTLY_ONCE, False)
+            End If
+        Catch ex As Exception
+            Console.WriteLine("exception during send mqtt: " + json)
         End Try
     End Sub
 
@@ -866,6 +948,20 @@ Public Class AppContext
             Tray.ContextMenuStrip.Invoke(d, New Object() {[val]})
         Else
             mnuConnect.Checked = [val]
+        End If
+    End Sub
+
+    Delegate Sub SetMQTTCallback([val] As Boolean)
+    Private Sub SetMQTTChecked(ByVal [val] As Boolean)
+
+        ' InvokeRequired required compares the thread ID of the
+        ' calling thread to the thread ID of the creating thread.
+        ' If these threads are different, it returns true.
+        If Tray.ContextMenuStrip.InvokeRequired Then
+            Dim d As New SetMQTTCallback(AddressOf SetMQTTChecked)
+            Tray.ContextMenuStrip.Invoke(d, New Object() {[val]})
+        Else
+            mnuMQTT.Checked = [val]
         End If
     End Sub
 
